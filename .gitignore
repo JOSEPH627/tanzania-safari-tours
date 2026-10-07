@@ -1,0 +1,34 @@
+# WordPress configuration
+wp-config.php
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# WordPress generated files
+wp-content/uploads/
+wp-content/upgrade/
+wp-content/cache/
+wp-content/backups/
+wp-content/ai1wm-backups/
+
+# Unused default themes
+wp-content/themes/twentytwentythree/
+wp-content/themes/twentytwentyfour/
+wp-content/themes/twentytwentyfive/
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+
+# Git
+.git/

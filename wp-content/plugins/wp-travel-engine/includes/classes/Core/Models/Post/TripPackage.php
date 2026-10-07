@@ -1,0 +1,773 @@
+<?php
+/**
+ * Trip Package Model.
+ *
+ * @package WPTravelEngine/Core/Models
+ * @since 6.0.0
+ */
+
+namespace WPTravelEngine\Core\Models\Post;
+
+use DateInterval;
+use WPTravelEngine\Abstracts\PostModel;
+
+/**
+ * Class TripPackage.
+ * This class represents a trip package to the WP Travel Engine plugin.
+ *
+ * @since 6.0.0
+ */
+class TripPackage extends PostModel {
+
+	/**
+	 * Post type name.
+	 *
+	 * @var string
+	 */
+	protected string $post_type = 'trip-packages';
+
+	/**
+	 * The trip object.
+	 *
+	 * @var Trip
+	 */
+	protected Trip $trip;
+
+	/**
+	 * if the primary traveler category has sale.
+	 *
+	 * @var bool
+	 */
+	public bool $has_sale = false;
+
+	/**
+	 * The primary traveler category price.
+	 *
+	 * @var float
+	 */
+	public float $price = 0.0;
+
+	/**
+	 * The primary traveler category sale price.
+	 *
+	 * @var float
+	 */
+	public float $sale_price = 0.0;
+
+	/**
+	 * The primary traveler category sale percentage.
+	 *
+	 * @var float
+	 */
+	public float $sale_percentage = 0.0;
+
+	/**
+	 * If the package has a group discount.
+	 *
+	 * @var bool
+	 */
+	public bool $has_group_discount = false;
+
+	/**
+	 * Group pricing.
+	 *
+	 * @var array
+	 */
+	public array $group_pricing = array();
+
+	/**
+	 * The default pricing.
+	 *
+	 * @var array
+	 */
+	public array $categories_pricings = array();
+
+	/**
+	 * The default pricing per date, keyed by date.
+	 *
+	 * @var array
+	 * @since 6.8.4
+	 */
+	protected array $def_cat_date = array();
+
+	/**
+	 * Booked pax per category per date, built in one pass: [ cat_id => [ date => count ] ].
+	 * null = not yet computed.
+	 *
+	 * @var array|null
+	 * @since 6.8.4
+	 */
+	protected ?array $booked_per_cat_date = null;
+
+	/**
+	 * The primary pricing category.
+	 *
+	 * @var TravelerCategory
+	 */
+	public TravelerCategory $primary_pricing_category;
+
+	/**
+	 * The primary pricing category sale amount.
+	 *
+	 * @var float
+	 * @since 6.6.5
+	 */
+	public float $sale_amount = 0.0;
+
+	/**
+	 *
+	 * @param $package
+	 * @param Trip $trip
+	 */
+	public function __construct( $package, Trip $trip ) {
+		$this->trip = $trip;
+		parent::__construct( $package );
+
+		$this->set_primary_pricing_category_details();
+	}
+
+	/**
+	 * Get the package title, translatable via the `wptravelengine_trip_package_title` filter.
+	 *
+	 * @return string
+	 * @since 6.8.6
+	 */
+	public function get_title(): string {
+		$title = parent::get_title();
+
+		/**
+		 * Filters the trip package's title, e.g. to translate it.
+		 *
+		 * @param string      $title   The package title.
+		 * @param TripPackage $package The package.
+		 * @since 6.8.6
+		 */
+		return apply_filters( 'wptravelengine_trip_package_title', $title, $this );
+	}
+
+	/**
+	 * Get the package description, translatable via the `wptravelengine_trip_package_description` filter.
+	 *
+	 * @return string
+	 * @since 6.8.6
+	 */
+	public function get_content(): string {
+		$description = parent::get_content();
+
+		/**
+		 * Filters the trip package's description, e.g. to translate it.
+		 *
+		 * @param string      $description The package description.
+		 * @param TripPackage $package     The package.
+		 * @since 6.8.6
+		 */
+		return apply_filters( 'wptravelengine_trip_package_description', $description, $this );
+	}
+
+	/**
+	 * Gets package's categories data.
+	 *
+	 * @return TravelerCategories
+	 */
+	public function get_traveler_categories(): TravelerCategories {
+		return new TravelerCategories( $this->trip, $this );
+	}
+
+	/**
+	 * Package Group Pricing.
+	 *
+	 * @return array
+	 */
+	public function get_group_pricing(): array {
+		$fields = apply_filters( 'wte_rest_fields__trip-packages', array(), true );
+
+		$callback = $fields['group-pricing']['get_callback'] ?? false;
+
+		if ( $callback ) {
+			return $callback( array( 'id' => $this->ID ), 'group-pricing' );
+		}
+
+		return array();
+	}
+
+	/**
+	 * Package Dates.
+	 *
+	 * @param array $args
+	 *
+	 * @return array
+	 * @since 6.7.9 Use wptravelengine_get_date_parser() helper for instantiation and propagate version arg to package date parsers.
+	 */
+	public function get_package_dates( array $args = array() ): array {
+
+		$dates = apply_filters( 'wptravelengine_get_package_dates', false, $this, $args );
+
+		if ( false !== $dates ) {
+			return $dates;
+		}
+
+		$from = $args['from'] ?? wp_date( 'Y-m-d' );
+		$to   = $args['to'] ?? wp_date( 'Y-m-d', strtotime( "{$from} +3 years" ) );
+
+		$cut_off_enabled = wptravelengine_toggled( $this->trip->get_setting( 'trip_cutoff_enable', 'false' ) );
+		if ( $cut_off_enabled ) {
+			$cut_off_period  = (int) $this->trip->get_setting( 'trip_cut_off_time', 0 );
+			$cut_off_unit    = $this->trip->get_setting( 'trip_cut_off_unit', 'days' );
+			$valid_date_time = wp_date( 'Y-m-d\TH:i', strtotime( "+$cut_off_period $cut_off_unit" ) );
+			$from            = wp_date( 'Y-m-d', strtotime( "+$cut_off_period $cut_off_unit", strtotime( $from ) ) );
+		} else {
+			$valid_date_time = wp_date( 'Y-m-d\TH:i' );
+		}
+
+		$fields = apply_filters( 'wte_rest_fields__trip-packages', array(), true );
+
+		$callback = $fields['package-dates']['get_callback'] ?? false;
+
+		if ( $callback ) {
+
+			$package_dates = $callback( array( 'id' => $this->ID ), 'package-dates' );
+
+			if ( ! is_array( $package_dates ) || empty( $package_dates ) ) {
+				$package_dates = array(
+					array(
+						'dtstart'      => $valid_date_time,
+						'is_recurring' => '1',
+						'rrule'        => array(
+							'r_frequency' => 'DAILY',
+							'r_until'     => $to,
+						),
+						'seats'        => '',
+					),
+				);
+			}
+
+			$dates = array();
+
+			$check_dates = array(
+				wp_date( 'Y-m-d' )                        => true,
+				wp_date( 'Y-m-d', strtotime( '+1 day' ) ) => true,
+				wp_date( 'Y-m-d', strtotime( '+2 day' ) ) => true,
+			);
+
+			foreach ( $package_dates as $package_date ) {
+				if ( isset( $args['version'] ) ) {
+					$package_date['version'] = $args['version'];
+				}
+
+				$package_date_parser = wptravelengine_get_date_parser( $this, $package_date );
+
+				$package_dates = $package_date_parser->get_dates( false, compact( 'from', 'to' ) );
+				foreach ( $package_dates as $date => $date_data ) {
+					if ( $date < $from ) {
+						continue;
+					}
+					if ( isset( $check_dates[ $date ] ) && $date_data['times'] ) {
+						$date_data['times'] = array_filter(
+							$date_data['times'],
+							function ( $time ) use ( $valid_date_time ) {
+								return $time['from'] >= $valid_date_time;
+							}
+						);
+						if ( empty( $date_data['times'] ) ) {
+							continue;
+						} else {
+							$date_data['times'] = array_values( $date_data['times'] );
+						}
+					}
+
+					if ( ! isset( $dates[ $date ] ) ) {
+						$dates[ $date ] = $date_data;
+						continue;
+					}
+
+					foreach ( $date_data['times'] as $value ) {
+						if ( ! in_array( $value['key'], array_column( $dates[ $date ]['times'], 'key' ) ) ) {
+							$dates[ $date ]['times'][] = $value;
+						}
+					}
+				}
+			}
+
+			return $dates;
+		}
+
+		$duration           = (int) $this->trip->get_setting( 'trip_duration', 0 );
+		$enabled_time_slots = ( $this->get_meta( 'enable_weekly_time_slots' ) ?? 'no' ) === 'yes';
+
+		$dates           = array();
+		$available_seats = $this->trip->get_maximum_participants();
+		$available_seats = is_numeric( $available_seats ) ? (int) $available_seats : '';
+
+		/**
+		 * @since 6.7.1 Added try-catch block to handle exceptions.
+		 */
+		try {
+			if ( $enabled_time_slots && 'days' !== $this->trip->get_setting( 'trip_duration_unit', 'days' ) ) {
+				$week_days_mapping = array_combine( range( 1, 7 ), array( 'MO', 'TU', 'WE', 'TH', 'FR', 'SA', 'SU' ) );
+				$weekly_time_slots = $this->get_meta( 'weekly_time_slots' );
+				$enable_week_days  = $this->get_meta( 'enable_week_days' );
+				$enable_week_days  = empty( $enable_week_days ) ? array_combine( array_values( $week_days_mapping ), array_fill( 0, 7, true ) ) : $enable_week_days;
+				$week_days         = array_keys( $weekly_time_slots );
+
+				$package_date_parser = wptravelengine_get_date_parser(
+					$this,
+					array(
+						'dtstart'      => $valid_date_time,
+						'is_recurring' => '1',
+						'rrule'        => array(
+							'r_frequency' => 'WEEKLY',
+							'r_weekdays'  => array_filter(
+								array_map(
+									function ( $week_day ) use ( $week_days_mapping, $enable_week_days ) {
+										if ( $enable_week_days[ $week_days_mapping[ $week_day ] ] ) {
+											return $week_days_mapping[ $week_day ];
+										}
+
+										return null;
+									},
+									$week_days
+								)
+							),
+							'r_until'     => wp_date( 'Y-m-d', strtotime( "{$valid_date_time} +3 years" ) ),
+						),
+						'seats'        => '',
+						'version'      => $args['version'] ?? 'v2',
+					)
+				);
+
+				$package_dates = $package_date_parser->get_dates();
+				/* @var DateTime $package_date */
+				foreach ( $package_dates as $package_date ) {
+					$date          = $package_date->format( 'Y-m-d' );
+					$times         = array();
+					$times_by_days = $weekly_time_slots[ $package_date->format( 'w' ) ?: 7 ] ?? array();
+					$i             = 0;
+					foreach ( $times_by_days as $key => $time ) {
+						if ( empty( $time ) ) {
+							continue;
+						}
+
+						list( $hours, $minutes ) = explode( ':', $time );
+
+						$package_date->setTime( $hours, $minutes );
+
+						$from_time = $package_date->format( 'Y-m-d\TH:i' );
+
+						if ( $from_time < $valid_date_time ) {
+							continue;
+						}
+
+						$duration = intval( $this->trip->get_setting( 'trip_duration', 0 ) );
+
+						$to = clone $package_date;
+						$to->add( new DateInterval( "PT{$duration}H" ) );
+
+						list( $seats, $capacity ) = $package_date_parser->get_seats_details( $date, $time );
+
+						$times[ $i ] = array(
+							'key'   => "{$this->ID}_{$package_date->format( 'Y-m-d_H:i' )}_{$to->format('H:i')}",
+							'from'  => $from_time,
+							'to'    => $to->format( 'Y-m-d\TH:i' ),
+							'seats' => $seats,
+						);
+
+						if ( 'v3' === $package_date_parser->version ) {
+							$times[ $i ]['capacity']   = $capacity;
+							$times[ $i ]['seats_left'] = $seats;
+						}
+						++$i;
+					}
+
+					$capacity       = $seats = '';
+					$dates[ $date ] = array();
+					if ( is_int( $available_seats ) ) {
+						$seats = array_sum( array_column( $times, 'seats' ) );
+						if ( 'v3' === $package_date_parser->version ) {
+							$capacity                   = array_sum( array_column( $times, 'capacity' ) );
+							$dates[ $date ]['capacity'] = $capacity;
+						}
+					}
+
+					$dates[ $date ]['times']   = $times;
+					$dates[ $date ]['seats']   = $seats;
+					$dates[ $date ]['pricing'] = $this->get_default_pricings( $date );
+				}
+			} else {
+				$package_date_parser = wptravelengine_get_date_parser(
+					$this,
+					array(
+						'dtstart'      => wp_date( 'Y-m-d' ),
+						'is_recurring' => '1',
+						'rrule'        => array(
+							'r_frequency' => 'DAILY',
+							'r_until'     => $to,
+						),
+						'seats'        => $available_seats,
+						'version'      => $args['version'] ?? 'v2',
+					)
+				);
+
+				$dates = $package_date_parser->get_dates( false, compact( 'from', 'to' ) );
+			}
+		} catch ( \Exception $e ) {
+			error_log( 'WPTE Error in get_package_dates for trip package ' . $this->ID . ': ' . $e->getMessage() );
+			return array( 'error' => $e->getMessage() );
+		}
+
+		return $dates;
+	}
+
+	/**
+	 * Returns the default traveler categories pricing.
+	 *
+	 * @param string|null $date When null (default), works as before, caching into
+	 *                           `$this->categories_pricings`. When given, caches into
+	 *                           `$this->def_cat_date[ $date ]` instead.
+	 *
+	 * @return array
+	 * @since 6.3.1
+	 * @since 6.8.4 Added $date param.
+	 * @since 6.8.7 Removed inline required-min-pax zeroing; now handled by `PackageDateParser::get_seats_details()`.
+	 */
+	public function get_default_pricings( ?string $date = null ): array {
+		$pricings = null !== $date ? ( $this->def_cat_date[ $date ] ?? array() ) : $this->categories_pricings;
+
+		if ( empty( $pricings ) ) {
+			$pricings                     = array();
+			$traveler_categories          = $this->get_traveler_categories();
+			$primary_traveler_category_id = $traveler_categories->get_primary_traveler_category()->id;
+
+			foreach ( $traveler_categories as $tc ) {
+				/** @var TravelerCategory $tc */
+				$cat_id     = $tc->id;
+				$seats_left = $this->get_cat_seats_left( $cat_id, $date );
+
+				if ( $tc->is_min_required && is_numeric( $seats_left ) && $seats_left < $tc->min_pax ) {
+					$seats_left = 0;
+				}
+
+				$pricings[] = array(
+					'id'                => $cat_id,
+					'label'             => $tc->get( 'label' ),
+					'price'             => $tc->get( 'has_sale' ) ? $tc->get( 'sale_price' ) : $tc->get( 'price' ),
+					'is_primary'        => $tc->get( 'id' ) === $primary_traveler_category_id,
+					'has_group_pricing' => $tc->get( 'enabled_group_discount' ),
+					'group_pricing'     => $tc->get( 'group_pricing' ),
+					'seats_left'        => $seats_left,
+					'max_cap'           => $this->get_cat_max_cap( $cat_id ),
+				);
+			}
+
+			if ( null !== $date ) {
+				$this->def_cat_date[ $date ] = $pricings;
+			} else {
+				$this->categories_pricings = $pricings;
+			}
+		}
+
+		return apply_filters( 'wptravelengine_trip_package_default_pricings', $pricings, $this );
+	}
+
+	/**
+	 * Get the trip object.
+	 *
+	 * @return Trip
+	 */
+	public function get_trip(): Trip {
+		return $this->trip;
+	}
+
+	/**
+	 * Get Package meta-value.
+	 *
+	 * @param $key string The meta-key.
+	 *
+	 * @return mixed
+	 * @since 6.1.0
+	 */
+	public function __get( string $key ) {
+		switch ( $key ) {
+			case 'package-categories':
+			case 'group-pricing':
+			case 'package-dates':
+				return $this->data[ $key ] ?? $this->get_meta( $key );
+			case 'default_pricings':
+				return $this->get_default_pricings();
+			default:
+				return null;
+		}
+	}
+
+	/**
+	 * Check if the package has a group discount.
+	 *
+	 * @return bool
+	 * @since 6.1.0
+	 */
+	public function has_group_discount(): bool {
+		return $this->has_group_discount;
+	}
+
+	/**
+	 * Sets primary Price category details.
+	 *
+	 * @return void
+	 * @since 6.1.0
+	 */
+	protected function set_primary_pricing_category_details() {
+
+		$this->primary_pricing_category = $this->get_traveler_categories()->get_primary_traveler_category();
+
+		$this->has_sale   = (bool) ( $this->primary_pricing_category->get( 'has_sale' ) ?? false );
+		$this->price      = (float) ( $this->primary_pricing_category->get( 'price' ) ?? 0 );
+		$this->sale_price = (float) ( $this->primary_pricing_category->get( 'sale_price' ) ?? 0 );
+
+		if ( $this->has_sale && $this->price > 0 ) {
+			$this->sale_amount     = $this->price - $this->sale_price;
+			$this->sale_percentage = round( ( ( $this->price - $this->sale_price ) / $this->price ) * 100 );
+		} else {
+			$this->sale_amount = $this->sale_percentage = 0;
+		}
+
+		$this->has_group_discount = (bool) ( $this->primary_pricing_category->get( 'enabled_group_discount' ) ?? false );
+		$this->group_pricing      = (array) ( $this->primary_pricing_category->get( 'group_pricing' ) ?? array() );
+	}
+
+	/**
+	 * Set the categories pricings.
+	 *
+	 * @return void
+	 * @since 6.2.2
+	 */
+	public function set_categories_pricings() {
+
+		if ( ! wptravelengine_is_addon_active( 'conditional-price' ) ) {
+			$this->categories_pricings = $this->get_default_pricings();
+			return;
+		}
+
+		$package_dates = $this->get_meta( 'package-dates' ) ?: array();
+
+		$package_date = array(
+			'dtstart'      => wp_date( 'Y-m-d' ),
+			'is_recurring' => false,
+			'seats'        => '',
+		);
+
+		if ( wptravelengine_is_addon_active( 'fixed-starting-dates' ) && ! empty( $package_dates ) ) {
+			usort( $package_dates, fn( $a, $b ) => strtotime( $a['dtstart'] ) <=> strtotime( $b['dtstart'] ) );
+			$comp_date       = wp_date( 'Y-m-d' );
+			$cut_off_enabled = wptravelengine_toggled( $this->trip->get_setting( 'trip_cutoff_enable', false ) );
+			if ( $cut_off_enabled ) {
+				$cut_off_period = (int) $this->trip->get_setting( 'trip_cut_off_time', 0 );
+				$cut_off_unit   = $this->trip->get_setting( 'trip_cut_off_unit', 'days' );
+				$comp_date      = wp_date( 'Y-m-d', strtotime( "+$cut_off_period $cut_off_unit" ) );
+			}
+			$package_date = current( array_filter( $package_dates, fn( $date ) => $date['dtstart'] >= $comp_date ) );
+		}
+
+		if ( $package_date ) {
+			$parser                    = wptravelengine_get_date_parser( $this, $package_date );
+			$this->categories_pricings = $parser->get_data_of( $package_date['dtstart'], 'pricing' );
+		} else {
+			$this->categories_pricings = $this->get_default_pricings();
+		}
+	}
+
+	/**
+	 * This function retrieves the nearest date pricing for the primary traveler category, even when the price has been conditionally overridden.
+	 *
+	 * @return array
+	 * @since 6.2.2
+	 */
+	public function get_actual_pricing_infos(): array {
+
+		$this->set_categories_pricings(); // phpcs:ignore WordPress.NamingConventions.ValidVariableName.UsedPropertyNotSnakeCase
+
+		$new_price     = floatval( $this->categories_pricings[0]['price'] ?? 0 );
+		$price         = $this->has_sale ? $this->price : $new_price;
+		$sale_price    = $this->has_sale ? $new_price : $this->sale_price;
+		$group_pricing = (array) ( $this->categories_pricings[0]['group_pricing'] ?? $this->group_pricing );
+
+		$has_sale        = $this->has_sale && ( $sale_price < $price );
+		$sale_percentage = ( $this->has_sale && $price > 0 ) ? round( ( ( $price - $sale_price ) / $price ) * 100 ) : 0;
+
+		return compact( 'price', 'sale_price', 'group_pricing', 'has_sale', 'sale_percentage' );
+	}
+
+	/**
+	 * Gets the max seat capacity configured for a Price category on this package,
+	 * based on the trip's `cap_per_cat` settings.
+	 *
+	 * @param int|null $cat_id Price category ID. When null, sums the max cap across all traveler
+	 *                          categories, returning '' if any of them is non-numeric (unlimited/disabled).
+	 *
+	 * @return int|string Max capacity, or '' when unlimited/disabled.
+	 * @since 6.8.4
+	 * @since 6.8.4 Added support for $cat_id = null to sum max cap across all traveler categories.
+	 */
+	public function get_cat_max_cap( ?int $cat_id = null ) {
+		if ( null === $cat_id ) {
+			$total = 0;
+
+			foreach ( $this->get_traveler_categories() as $traveler_category ) {
+				if ( ! is_numeric( $traveler_category->get( 'price' ) ) ) {
+					continue;
+				}
+
+				$max_cap = $this->get_cat_max_cap( $traveler_category->id );
+
+				if ( ! is_numeric( $max_cap ) ) {
+					return '';
+				}
+
+				$total += $max_cap;
+			}
+
+			return $total;
+		}
+
+		if ( ! $this->trip->is_cap_per_cat( 'enabled' ) ) {
+			return '';
+		}
+
+		$cap_per_cat = $this->trip->get_cap_per_cat();
+
+		if ( $this->trip->is_cap_per_cat( 'different' ) ) {
+			$pkg_entry = current(
+				array_filter(
+					$cap_per_cat['package_limits'] ?? array(),
+					fn( $pl ) => (int) ( $pl['package_id'] ?? 0 ) === $this->ID
+				)
+			);
+			$limits    = is_array( $pkg_entry ) ? ( $pkg_entry['limits'] ?? array() ) : array();
+		} else {
+			$limits = $cap_per_cat['limits'] ?? array();
+		}
+
+		foreach ( $limits as $limit ) {
+			if ( (int) ( $limit['id'] ?? 0 ) === $cat_id ) {
+				return '' === ( $limit['max_seats'] ?? '' ) ? '' : (int) $limit['max_seats'];
+			}
+		}
+
+		return '';
+	}
+
+	/**
+	 * Builds and caches a [cat_id => [date => booked_count]] table in one pass over all
+	 * published bookings. Called at most once per TripPackage instance per request.
+	 *
+	 * @return array
+	 * @since 6.8.4
+	 */
+	protected function get_booked_per_cat_date(): array {
+		if ( null !== $this->booked_per_cat_date ) {
+			return $this->booked_per_cat_date;
+		}
+
+		$bookings = $this->trip->get_bookings( array( 'post_status' => 'publish' ) );
+
+		$this->booked_per_cat_date = array();
+
+		if ( empty( $bookings ) ) {
+			return $this->booked_per_cat_date;
+		}
+
+		$package_ids = $this->trip->is_cap_per_cat( 'same' ) ? $this->trip->get_all_package_ids() : array( $this->ID );
+
+		foreach ( $bookings as $booking ) {
+			$booking_date = substr( $booking->get_trip_datetime(), 0, 10 );
+			foreach ( $package_ids as $pkg_id ) {
+				foreach ( $booking->get_booked_count( $pkg_id ) as $c_id => $qty ) {
+					$this->booked_per_cat_date[ $c_id ][ $booking_date ] = ( $this->booked_per_cat_date[ $c_id ][ $booking_date ] ?? 0 ) + (int) $qty;
+				}
+			}
+		}
+
+		return $this->booked_per_cat_date;
+	}
+
+	/**
+	 * Gets the seats left capacity configured for a Price category on this package.
+	 *
+	 * @param int|null    $cat_id Price category ID. When null, sums the seats left across all traveler
+	 *                             categories, returning '' if any of them is non-numeric (unlimited/disabled).
+	 * @param string|null $date   Y-m-d date to check. When provided, returns a scalar (int seats left,
+	 *                             or '' when unlimited). When null, returns array<string, int> keyed by date.
+	 *
+	 * @return int|string|array Seats left, or '' when unlimited/disabled.
+	 * @since 6.8.4
+	 * @since 6.8.4 Added support for $cat_id = null to sum seats left across all traveler categories.
+	 */
+	public function get_cat_seats_left( ?int $cat_id = null, ?string $date = null ) {
+		if ( null === $cat_id ) {
+			$totals = null !== $date ? 0 : array();
+
+			foreach ( $this->get_traveler_categories() as $traveler_category ) {
+				if ( ! is_numeric( $traveler_category->get( 'price' ) ) ) {
+					continue;
+				}
+
+				$seats_left = $this->get_cat_seats_left( $traveler_category->id, $date );
+
+				if ( null !== $date ) {
+					if ( ! is_numeric( $seats_left ) ) {
+						return '';
+					}
+
+					$totals += $seats_left;
+					continue;
+				}
+
+				if ( ! is_array( $seats_left ) ) {
+					return '';
+				}
+
+				foreach ( $seats_left as $seats_left_date => $seats_left_for_date ) {
+					$totals[ $seats_left_date ] = ( $totals[ $seats_left_date ] ?? 0 ) + $seats_left_for_date;
+				}
+			}
+
+			return $totals;
+		}
+
+		$max_cap = $this->get_cat_max_cap( $cat_id );
+
+		if ( ! is_numeric( $max_cap ) ) {
+			return $max_cap;
+		}
+
+		$booked_by_date = $this->get_booked_per_cat_date()[ $cat_id ] ?? array();
+
+		if ( null !== $date ) {
+			return max( 0, $max_cap - ( $booked_by_date[ $date ] ?? 0 ) );
+		}
+
+		return array_map(
+			fn( $booked ) => max( 0, $max_cap - $booked ),
+			$booked_by_date
+		);
+	}
+
+	/**
+	 * Returns the enforced minimum pax for each traveler category marked as required.
+	 *
+	 * @return array<int, int> Price category ID => enforced minimum pax (empty/non-numeric min pax falls back to 1).
+	 * @since 6.8.7
+	 */
+	public function get_required_min_paxes(): array {
+		$min_paxes = array();
+
+		foreach ( $this->get_traveler_categories() as $tc ) {
+			/** @var TravelerCategory $tc */
+			if ( ! $tc->is_min_required ) {
+				continue;
+			}
+
+			$min_paxes[ $tc->id ] = is_numeric( $tc->min_pax ) && $tc->min_pax > 0 ? (int) $tc->min_pax : 1;
+		}
+
+		return $min_paxes;
+	}
+}
